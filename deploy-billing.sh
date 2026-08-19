@@ -42,19 +42,20 @@ docker compose up -d --build
 
 echo "→ ממתין לאפליקציה…"
 for i in $(seq 1 60); do
-  if docker compose exec -T app wget -qO- http://localhost:3000/ >/dev/null 2>&1; then break; fi
+  if docker exec zerem-app node -e 'fetch("http://localhost:3000/").then(()=>process.exit(0)).catch(()=>process.exit(1))' >/dev/null 2>&1; then break; fi
   sleep 3
 done
 
 # ── ה-cron היומי ──
-# 03:00 שעון ישראל = 00:00 UTC בשעון קיץ. הקריאה היא ל-localhost
-# כדי שהנתיב לא ייחשף לאינטרנט.
-SECRET=$(grep '^CRON_SECRET=' .env | cut -d= -f2-)
-cat > /etc/cron.d/zerem-billing <<EOF
+# 03:00 שעון ישראל. הקריאה עוברת דרך run-billing.sh שמריץ node fetch
+# בתוך הקונטיינר — לתמונת node:alpine אין wget, וזה הפיל את הגרסה הראשונה.
+install -m 755 /opt/zerem/run-billing.sh /opt/zerem/run-billing.sh 2>/dev/null || true
+chmod +x /opt/zerem/run-billing.sh
+cat > /etc/cron.d/zerem-billing <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 CRON_TZ=Asia/Jerusalem
-0 3 * * * root docker exec zerem-app wget -qO- --header="Authorization: Bearer ${SECRET}" --post-data='' http://localhost:3000/api/cron/billing >> /var/log/zerem-billing.log 2>&1
+0 3 * * * root /opt/zerem/run-billing.sh >> /var/log/zerem-billing.log 2>&1
 EOF
 chmod 644 /etc/cron.d/zerem-billing
 service cron reload 2>/dev/null || systemctl reload cron 2>/dev/null || true
@@ -64,14 +65,16 @@ echo "✓ cron יומי הותקן — 03:00 שעון ישראל"
 echo ""
 echo "→ בדיקת מסלולים:"
 for p in / /pricing /settings/billing /admin/revenue /admin/coupons; do
-  CODE=$(docker compose exec -T app wget -qO- -S "http://localhost:3000$p" 2>&1 | grep -m1 'HTTP/' | awk '{print $2}' || echo "??")
-  printf "   %-22s %s\n" "$p" "${CODE:-??}"
+  CODE=$(docker exec -e P="$p" zerem-app node -e \
+    'fetch("http://localhost:3000"+process.env.P).then(r=>console.log(r.status)).catch(()=>console.log("ERR"))' 2>/dev/null || echo "ERR")
+  printf "   %-22s %s\n" "$p" "${CODE:-ERR}"
 done
 
 echo ""
-echo "→ הרצת cron יבשה (dryRun — לא מחייב כלום):"
-docker exec zerem-app wget -qO- --header="Authorization: Bearer ${SECRET}" \
-  --post-data='' "http://localhost:3000/api/cron/billing?dryRun=1" || echo "⚠ נכשל"
+echo "→ הרצת מחזור יבשה (dryRun — לא מחייב כלום):"
+SECRET=$(grep '^CRON_SECRET=' /opt/zerem/.env | cut -d= -f2-)
+docker exec -e U="http://localhost:3000/api/cron/billing?dryRun=1" -e A="Bearer $SECRET" zerem-app \
+  node -e 'fetch(process.env.U,{method:"POST",headers:{Authorization:process.env.A}}).then(r=>r.text()).then(console.log).catch(e=>console.log("ERR",String(e)))'
 
 echo ""
 echo "═══════════════════════════════════════"
